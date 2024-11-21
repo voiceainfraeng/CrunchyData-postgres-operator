@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
 
@@ -169,7 +158,7 @@ func (r *Reconciler) generatePGAdminService(
 	// requires updates to the pgAdmin service configuration.
 	servicePort := corev1.ServicePort{
 		Name:       naming.PortPGAdmin,
-		Port:       *initialize.Int32(5050),
+		Port:       5050,
 		Protocol:   corev1.ProtocolTCP,
 		TargetPort: intstr.FromString(naming.PortPGAdmin),
 	}
@@ -192,6 +181,8 @@ func (r *Reconciler) generatePGAdminService(
 			}
 			servicePort.NodePort = *spec.NodePort
 		}
+		service.Spec.ExternalTrafficPolicy = initialize.FromPointer(spec.ExternalTrafficPolicy)
+		service.Spec.InternalTrafficPolicy = spec.InternalTrafficPolicy
 	}
 	service.Spec.Ports = []corev1.ServicePort{servicePort}
 
@@ -303,11 +294,8 @@ func (r *Reconciler) reconcilePGAdminStatefulSet(
 	// Use scheduling constraints from the cluster spec.
 	sts.Spec.Template.Spec.Affinity = cluster.Spec.UserInterface.PGAdmin.Affinity
 	sts.Spec.Template.Spec.Tolerations = cluster.Spec.UserInterface.PGAdmin.Tolerations
-
-	if cluster.Spec.UserInterface.PGAdmin.PriorityClassName != nil {
-		sts.Spec.Template.Spec.PriorityClassName = *cluster.Spec.UserInterface.PGAdmin.PriorityClassName
-	}
-
+	sts.Spec.Template.Spec.PriorityClassName =
+		initialize.FromPointer(cluster.Spec.UserInterface.PGAdmin.PriorityClassName)
 	sts.Spec.Template.Spec.TopologySpreadConstraints =
 		cluster.Spec.UserInterface.PGAdmin.TopologySpreadConstraints
 

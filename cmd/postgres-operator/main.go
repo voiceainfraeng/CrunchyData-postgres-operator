@@ -1,19 +1,8 @@
+// Copyright 2017 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package main
-
-/*
-Copyright 2017 - 2024 Crunchy Data Solutions, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
 
 import (
 	"context"
@@ -23,11 +12,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"go.opentelemetry.io/otel"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 
 	"github.com/crunchydata/postgres-operator/internal/bridge"
 	"github.com/crunchydata/postgres-operator/internal/bridge/crunchybridgecluster"
@@ -35,12 +26,12 @@ import (
 	"github.com/crunchydata/postgres-operator/internal/controller/postgrescluster"
 	"github.com/crunchydata/postgres-operator/internal/controller/runtime"
 	"github.com/crunchydata/postgres-operator/internal/controller/standalone_pgadmin"
+	"github.com/crunchydata/postgres-operator/internal/feature"
 	"github.com/crunchydata/postgres-operator/internal/initialize"
 	"github.com/crunchydata/postgres-operator/internal/logging"
 	"github.com/crunchydata/postgres-operator/internal/naming"
 	"github.com/crunchydata/postgres-operator/internal/registration"
 	"github.com/crunchydata/postgres-operator/internal/upgradecheck"
-	"github.com/crunchydata/postgres-operator/internal/util"
 	"github.com/crunchydata/postgres-operator/pkg/apis/postgres-operator.crunchydata.com/v1beta1"
 )
 
@@ -65,13 +56,15 @@ func initLogging() {
 	runtime.SetLogger(global)
 }
 
-//+kubebuilder:rbac:groups="coordination.k8s.io",resources="leases",verbs={get,create,update}
+//+kubebuilder:rbac:groups="coordination.k8s.io",resources="leases",verbs={get,create,update,watch}
 
 func initManager() (runtime.Options, error) {
 	log := logging.FromContext(context.Background())
 
 	options := runtime.Options{}
 	options.Cache.SyncPeriod = initialize.Pointer(time.Hour)
+
+	options.HealthProbeBindAddress = ":8081"
 
 	// Enable leader elections when configured with a valid Lease.coordination.k8s.io name.
 	// - https://docs.k8s.io/concepts/architecture/leases
@@ -86,8 +79,29 @@ func initManager() (runtime.Options, error) {
 		options.LeaderElectionNamespace = os.Getenv("PGO_NAMESPACE")
 	}
 
-	if namespace := os.Getenv("PGO_TARGET_NAMESPACE"); len(namespace) > 0 {
-		options.Cache.DefaultNamespaces = map[string]runtime.CacheConfig{namespace: {}}
+	// Check PGO_TARGET_NAMESPACE for backwards compatibility with
+	// "singlenamespace" installations
+	singlenamespace := strings.TrimSpace(os.Getenv("PGO_TARGET_NAMESPACE"))
+
+	// Check PGO_TARGET_NAMESPACES for non-cluster-wide, multi-namespace
+	// installations
+	multinamespace := strings.TrimSpace(os.Getenv("PGO_TARGET_NAMESPACES"))
+
+	// Initialize DefaultNamespaces if any target namespaces are set
+	if len(singlenamespace) > 0 || len(multinamespace) > 0 {
+		options.Cache.DefaultNamespaces = map[string]runtime.CacheConfig{}
+	}
+
+	if len(singlenamespace) > 0 {
+		options.Cache.DefaultNamespaces[singlenamespace] = runtime.CacheConfig{}
+	}
+
+	if len(multinamespace) > 0 {
+		for _, namespace := range strings.FieldsFunc(multinamespace, func(c rune) bool {
+			return c != '-' && !unicode.IsLetter(c) && !unicode.IsNumber(c)
+		}) {
+			options.Cache.DefaultNamespaces[namespace] = runtime.CacheConfig{}
+		}
 	}
 
 	options.Controller.GroupKindConcurrency = map[string]int{
@@ -109,10 +123,6 @@ func main() {
 	// This context is canceled by SIGINT, SIGTERM, or by calling shutdown.
 	ctx, shutdown := context.WithCancel(runtime.SignalHandler())
 
-	// Set any supplied feature gates; panic on any unrecognized feature gate
-	err := util.AddAndSetFeatureGates(os.Getenv("PGO_FEATURE_GATES"))
-	assertNoError(err)
-
 	otelFlush, err := initOpenTelemetry()
 	assertNoError(err)
 	defer otelFlush()
@@ -122,8 +132,9 @@ func main() {
 	log := logging.FromContext(ctx)
 	log.V(1).Info("debug flag set to true")
 
-	log.Info("feature gates enabled",
-		"PGO_FEATURE_GATES", os.Getenv("PGO_FEATURE_GATES"))
+	features := feature.NewGate()
+	assertNoError(features.Set(os.Getenv("PGO_FEATURE_GATES")))
+	log.Info("feature gates enabled", "PGO_FEATURE_GATES", features.String())
 
 	cfg, err := runtime.GetConfig()
 	assertNoError(err)
@@ -138,6 +149,14 @@ func main() {
 	options, err := initManager()
 	assertNoError(err)
 
+	// Add to the Context that Manager passes to Reconciler.Start, Runnable.Start,
+	// and eventually Reconciler.Reconcile.
+	options.BaseContext = func() context.Context {
+		ctx := context.Background()
+		ctx = feature.NewContext(ctx, features)
+		return ctx
+	}
+
 	mgr, err := runtime.NewManager(cfg, options)
 	assertNoError(err)
 
@@ -149,12 +168,12 @@ func main() {
 	registrar, err := registration.NewRunner(os.Getenv("RSA_KEY"), os.Getenv("TOKEN_PATH"), shutdown)
 	assertNoError(err)
 	assertNoError(mgr.Add(registrar))
-	_ = registrar.CheckToken()
+	token, _ := registrar.CheckToken()
 
 	// add all PostgreSQL Operator controllers to the runtime manager
 	addControllersToManager(mgr, openshift, log, registrar)
 
-	if util.DefaultMutableFeatureGate.Enabled(util.BridgeIdentifiers) {
+	if features.Enabled(feature.BridgeIdentifiers) {
 		constructor := func() *bridge.Client {
 			client := bridge.NewClient(os.Getenv("PGO_BRIDGE_URL"), versionString)
 			client.Transport = otelTransportWrapper()(http.DefaultTransport)
@@ -169,11 +188,21 @@ func main() {
 	if !upgradeCheckingDisabled {
 		log.Info("upgrade checking enabled")
 		// get the URL for the check for upgrades endpoint if set in the env
-		assertNoError(upgradecheck.ManagedScheduler(mgr,
-			openshift, os.Getenv("CHECK_FOR_UPGRADES_URL"), versionString))
+		assertNoError(
+			upgradecheck.ManagedScheduler(
+				mgr,
+				openshift,
+				os.Getenv("CHECK_FOR_UPGRADES_URL"),
+				versionString,
+				token,
+			))
 	} else {
 		log.Info("upgrade checking disabled")
 	}
+
+	// Enable health probes
+	assertNoError(mgr.AddHealthzCheck("health", healthz.Ping))
+	assertNoError(mgr.AddReadyzCheck("check", healthz.Ping))
 
 	log.Info("starting controller runtime manager and will wait for signal to exit")
 

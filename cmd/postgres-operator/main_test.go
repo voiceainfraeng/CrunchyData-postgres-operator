@@ -1,17 +1,6 @@
-/*
-Copyright 2017 - 2024 Crunchy Data Solutions, Inc.
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright 2017 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package main
 
@@ -33,6 +22,8 @@ func TestInitManager(t *testing.T) {
 			assert.Equal(t, *options.Cache.SyncPeriod, time.Hour)
 		}
 
+		assert.Assert(t, options.HealthProbeBindAddress == ":8081")
+
 		assert.DeepEqual(t, options.Controller.GroupKindConcurrency,
 			map[string]int{
 				"PostgresCluster.postgres-operator.crunchydata.com": 2,
@@ -44,6 +35,7 @@ func TestInitManager(t *testing.T) {
 		{
 			options.Cache.SyncPeriod = nil
 			options.Controller.GroupKindConcurrency = nil
+			options.HealthProbeBindAddress = ""
 
 			assert.Assert(t, reflect.ValueOf(options).IsZero(),
 				"expected remaining fields to be unset:\n%+v", options)
@@ -83,9 +75,19 @@ func TestInitManager(t *testing.T) {
 		assert.Assert(t, cmp.Len(options.Cache.DefaultNamespaces, 1),
 			"expected only one configured namespace")
 
-		for k := range options.Cache.DefaultNamespaces {
-			assert.Equal(t, k, "some-such")
-		}
+		assert.Assert(t, cmp.Contains(options.Cache.DefaultNamespaces, "some-such"))
+	})
+
+	t.Run("PGO_TARGET_NAMESPACES", func(t *testing.T) {
+		t.Setenv("PGO_TARGET_NAMESPACES", "some-such,another-one")
+
+		options, err := initManager()
+		assert.NilError(t, err)
+		assert.Assert(t, cmp.Len(options.Cache.DefaultNamespaces, 2),
+			"expect two configured namespaces")
+
+		assert.Assert(t, cmp.Contains(options.Cache.DefaultNamespaces, "some-such"))
+		assert.Assert(t, cmp.Contains(options.Cache.DefaultNamespaces, "another-one"))
 	})
 
 	t.Run("PGO_WORKERS", func(t *testing.T) {

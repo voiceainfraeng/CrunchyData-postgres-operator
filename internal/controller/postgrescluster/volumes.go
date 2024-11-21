@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
 
@@ -510,10 +499,9 @@ func (r *Reconciler) reconcileMovePGDataDir(ctx context.Context,
 		},
 	}
 	// set the priority class name, if it exists
-	if len(cluster.Spec.InstanceSets) > 0 &&
-		cluster.Spec.InstanceSets[0].PriorityClassName != nil {
+	if len(cluster.Spec.InstanceSets) > 0 {
 		jobSpec.Template.Spec.PriorityClassName =
-			*cluster.Spec.InstanceSets[0].PriorityClassName
+			initialize.FromPointer(cluster.Spec.InstanceSets[0].PriorityClassName)
 	}
 	moveDirJob.Spec = *jobSpec
 
@@ -628,10 +616,9 @@ func (r *Reconciler) reconcileMoveWALDir(ctx context.Context,
 		},
 	}
 	// set the priority class name, if it exists
-	if len(cluster.Spec.InstanceSets) > 0 &&
-		cluster.Spec.InstanceSets[0].PriorityClassName != nil {
+	if len(cluster.Spec.InstanceSets) > 0 {
 		jobSpec.Template.Spec.PriorityClassName =
-			*cluster.Spec.InstanceSets[0].PriorityClassName
+			initialize.FromPointer(cluster.Spec.InstanceSets[0].PriorityClassName)
 	}
 	moveDirJob.Spec = *jobSpec
 
@@ -751,9 +738,7 @@ func (r *Reconciler) reconcileMoveRepoDir(ctx context.Context,
 	}
 	// set the priority class name, if it exists
 	if repoHost := cluster.Spec.Backups.PGBackRest.RepoHost; repoHost != nil {
-		if repoHost.PriorityClassName != nil {
-			jobSpec.Template.Spec.PriorityClassName = *repoHost.PriorityClassName
-		}
+		jobSpec.Template.Spec.PriorityClassName = initialize.FromPointer(repoHost.PriorityClassName)
 	}
 	moveDirJob.Spec = *jobSpec
 

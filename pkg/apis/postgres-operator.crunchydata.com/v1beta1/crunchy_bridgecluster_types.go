@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package v1beta1
 
@@ -34,7 +23,7 @@ type CrunchyBridgeClusterSpec struct {
 
 	// Whether the cluster is protected. Protected clusters can't be destroyed until
 	// their protected flag is removed
-	// +optional
+	// +kubebuilder:validation:Optional
 	IsProtected bool `json:"isProtected,omitempty"`
 
 	// The name of the cluster
@@ -53,10 +42,10 @@ type CrunchyBridgeClusterSpec struct {
 	Plan string `json:"plan"`
 
 	// The ID of the cluster's major Postgres version.
-	// Currently Bridge offers 13-16
+	// Currently Bridge offers 13-17
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=13
-	// +kubebuilder:validation:Maximum=16
+	// +kubebuilder:validation:Maximum=17
 	// +operator-sdk:csv:customresourcedefinitions:type=spec,order=1
 	PostgresVersion int `json:"majorVersion"`
 
@@ -76,14 +65,14 @@ type CrunchyBridgeClusterSpec struct {
 	// are retrieved from the Bridge API. An empty list creates no role secrets.
 	// Removing a role from this list does NOT drop the role nor revoke their
 	// access, but it will delete that role's secret from the kube cluster.
+	// +kubebuilder:validation:Optional
 	// +listType=map
 	// +listMapKey=name
-	// +optional
 	Roles []*CrunchyBridgeClusterRoleSpec `json:"roles,omitempty"`
 
 	// The name of the secret containing the API key and team id
 	// +kubebuilder:validation:Required
-	Secret string `json:"secret,omitempty"`
+	Secret string `json:"secret"`
 
 	// The amount of storage available to the cluster in gigabytes.
 	// The amount must be an integer, followed by Gi (gibibytes) or G (gigabytes) to match Kubernetes conventions.
@@ -97,9 +86,11 @@ type CrunchyBridgeClusterSpec struct {
 type CrunchyBridgeClusterRoleSpec struct {
 	// Name of the role within Crunchy Bridge.
 	// More info: https://docs.crunchybridge.com/concepts/users
+	// +kubebuilder:validation:Required
 	Name string `json:"name"`
 
 	// The name of the Secret that will hold the role credentials.
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Type=string

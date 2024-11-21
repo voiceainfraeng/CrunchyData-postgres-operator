@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
 
@@ -27,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/crunchydata/postgres-operator/internal/config"
+	"github.com/crunchydata/postgres-operator/internal/feature"
 	"github.com/crunchydata/postgres-operator/internal/initialize"
 	"github.com/crunchydata/postgres-operator/internal/logging"
 	"github.com/crunchydata/postgres-operator/internal/naming"
@@ -240,11 +230,12 @@ func (r *Reconciler) reconcileMonitoringSecret(
 // addPGMonitorToInstancePodSpec performs the necessary setup to add
 // pgMonitor resources on a PodTemplateSpec
 func addPGMonitorToInstancePodSpec(
+	ctx context.Context,
 	cluster *v1beta1.PostgresCluster,
 	template *corev1.PodTemplateSpec,
 	exporterQueriesConfig, exporterWebConfig *corev1.ConfigMap) error {
 
-	err := addPGMonitorExporterToInstancePodSpec(cluster, template, exporterQueriesConfig, exporterWebConfig)
+	err := addPGMonitorExporterToInstancePodSpec(ctx, cluster, template, exporterQueriesConfig, exporterWebConfig)
 
 	return err
 }
@@ -255,6 +246,7 @@ func addPGMonitorToInstancePodSpec(
 // the exporter container cannot be created; Testing relies on ensuring the
 // monitoring secret is available
 func addPGMonitorExporterToInstancePodSpec(
+	ctx context.Context,
 	cluster *v1beta1.PostgresCluster,
 	template *corev1.PodTemplateSpec,
 	exporterQueriesConfig, exporterWebConfig *corev1.ConfigMap) error {
@@ -267,13 +259,34 @@ func addPGMonitorExporterToInstancePodSpec(
 	withBuiltInCollectors :=
 		!strings.EqualFold(cluster.Annotations[naming.PostgresExporterCollectorsAnnotation], "None")
 
+	var cmd []string
+	// PG 17 does not include some of the columns found in stat_bgwriter with older PGs.
+	// Selectively turn off the collector for stat_bgwriter in PG 17, unless the user
+	// requests all collectors to be turned off.
+	switch {
+	case cluster.Spec.PostgresVersion == 17 && withBuiltInCollectors && certSecret == nil:
+		cmd = pgmonitor.ExporterStartCommand(withBuiltInCollectors,
+			pgmonitor.ExporterDeactivateStatBGWriterFlag)
+	case cluster.Spec.PostgresVersion == 17 && withBuiltInCollectors && certSecret != nil:
+		cmd = pgmonitor.ExporterStartCommand(withBuiltInCollectors,
+			pgmonitor.ExporterWebConfigFileFlag,
+			pgmonitor.ExporterDeactivateStatBGWriterFlag)
+	// If you're turning off all built-in collectors, we don't care which
+	// version of PG you're using.
+	case certSecret != nil:
+		cmd = pgmonitor.ExporterStartCommand(withBuiltInCollectors,
+			pgmonitor.ExporterWebConfigFileFlag)
+	default:
+		cmd = pgmonitor.ExporterStartCommand(withBuiltInCollectors)
+	}
+
 	securityContext := initialize.RestrictedSecurityContext()
 	exporterContainer := corev1.Container{
 		Name:            naming.ContainerPGMonitorExporter,
 		Image:           config.PGExporterContainerImage(cluster),
 		ImagePullPolicy: cluster.Spec.ImagePullPolicy,
 		Resources:       cluster.Spec.Monitoring.PGMonitor.Exporter.Resources,
-		Command:         pgmonitor.ExporterStartCommand(withBuiltInCollectors),
+		Command:         cmd,
 		Env: []corev1.EnvVar{
 			{Name: "DATA_SOURCE_URI", Value: fmt.Sprintf("%s:%d/%s", pgmonitor.ExporterHost, *cluster.Spec.Port, pgmonitor.ExporterDB)},
 			{Name: "DATA_SOURCE_USER", Value: pgmonitor.MonitoringUser},
@@ -323,7 +336,7 @@ func addPGMonitorExporterToInstancePodSpec(
 	// Therefore, we only want to add the default queries ConfigMap as a source for the
 	// "exporter-config" volume if the AppendCustomQueries feature gate is turned on OR if the
 	// user has not provided any custom configuration.
-	if util.DefaultMutableFeatureGate.Enabled(util.AppendCustomQueries) ||
+	if feature.Enabled(ctx, feature.AppendCustomQueries) ||
 		cluster.Spec.Monitoring.PGMonitor.Exporter.Configuration == nil {
 
 		defaultConfigVolumeProjection := corev1.VolumeProjection{
@@ -365,8 +378,6 @@ func addPGMonitorExporterToInstancePodSpec(
 		}}
 
 		exporterContainer.VolumeMounts = append(exporterContainer.VolumeMounts, mounts...)
-		exporterContainer.Command = pgmonitor.ExporterStartCommand(
-			withBuiltInCollectors, pgmonitor.ExporterWebConfigFileFlag)
 	}
 
 	template.Spec.Containers = append(template.Spec.Containers, exporterContainer)

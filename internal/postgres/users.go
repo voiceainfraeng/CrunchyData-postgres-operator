@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgres
 
@@ -23,9 +12,9 @@ import (
 
 	pg_query "github.com/pganalyze/pg_query_go/v5"
 
+	"github.com/crunchydata/postgres-operator/internal/feature"
 	"github.com/crunchydata/postgres-operator/internal/logging"
 	"github.com/crunchydata/postgres-operator/internal/naming"
-	"github.com/crunchydata/postgres-operator/internal/util"
 	"github.com/crunchydata/postgres-operator/pkg/apis/postgres-operator.crunchydata.com/v1beta1"
 )
 
@@ -170,10 +159,10 @@ SELECT pg_catalog.format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I',
 
 	log.V(1).Info("wrote PostgreSQL users", "stdout", stdout, "stderr", stderr)
 
-	// The operator will attemtp to write schemas for the users in the spec if
+	// The operator will attempt to write schemas for the users in the spec if
 	// 	* the feature gate is enabled and
 	// 	* the cluster is annotated.
-	if util.DefaultMutableFeatureGate.Enabled(util.AutoCreateUserSchema) {
+	if feature.Enabled(ctx, feature.AutoCreateUserSchema) {
 		autoCreateUserSchemaAnnotationValue, annotationExists := cluster.Annotations[naming.AutoCreateUserSchemaAnnotation]
 		if annotationExists && strings.EqualFold(autoCreateUserSchemaAnnotationValue, "true") {
 			log.V(1).Info("Writing schemas for users.")

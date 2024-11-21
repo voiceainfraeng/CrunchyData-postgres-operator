@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
 
@@ -35,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/crunchydata/postgres-operator/internal/feature"
 	"github.com/crunchydata/postgres-operator/internal/initialize"
 	"github.com/crunchydata/postgres-operator/internal/logging"
 	"github.com/crunchydata/postgres-operator/internal/naming"
@@ -55,7 +45,7 @@ func (r *Reconciler) generatePostgresUserSecret(
 	username := string(spec.Name)
 	intent := &corev1.Secret{ObjectMeta: naming.PostgresUserSecret(cluster, username)}
 	intent.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Secret"))
-	initialize.ByteMap(&intent.Data)
+	initialize.Map(&intent.Data)
 
 	// Populate the Secret with libpq keywords for connecting through
 	// the primary Service.
@@ -579,7 +569,7 @@ func (r *Reconciler) reconcilePostgresUsersInPostgreSQL(
 func (r *Reconciler) reconcilePostgresDataVolume(
 	ctx context.Context, cluster *v1beta1.PostgresCluster,
 	instanceSpec *v1beta1.PostgresInstanceSetSpec, instance *appsv1.StatefulSet,
-	clusterVolumes []corev1.PersistentVolumeClaim,
+	clusterVolumes []corev1.PersistentVolumeClaim, sourceCluster *v1beta1.PostgresCluster,
 ) (*corev1.PersistentVolumeClaim, error) {
 
 	labelMap := map[string]string{
@@ -620,6 +610,32 @@ func (r *Reconciler) reconcilePostgresDataVolume(
 
 	pvc.Spec = instanceSpec.DataVolumeClaimSpec
 
+	// If a source cluster was provided and VolumeSnapshots are turned on in the source cluster and
+	// there is a VolumeSnapshot available for the source cluster that is ReadyToUse, use it as the
+	// source for the PVC. If there is an error when retrieving VolumeSnapshots, or no ReadyToUse
+	// snapshots were found, create a warning event, but continue creating PVC in the usual fashion.
+	if sourceCluster != nil && sourceCluster.Spec.Backups.Snapshots != nil && feature.Enabled(ctx, feature.VolumeSnapshots) {
+		snapshots, err := r.getSnapshotsForCluster(ctx, sourceCluster)
+		if err == nil {
+			snapshot := getLatestReadySnapshot(snapshots)
+			if snapshot != nil {
+				r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "BootstrappingWithSnapshot",
+					"Snapshot found for %v; bootstrapping cluster with snapshot.", sourceCluster.Name)
+				pvc.Spec.DataSource = &corev1.TypedLocalObjectReference{
+					APIGroup: initialize.String("snapshot.storage.k8s.io"),
+					Kind:     snapshot.Kind,
+					Name:     snapshot.Name,
+				}
+			} else {
+				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "SnapshotNotFound",
+					"No ReadyToUse snapshots were found for %v; proceeding with typical restore process.", sourceCluster.Name)
+			}
+		} else {
+			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "SnapshotNotFound",
+				"Could not get snapshots for %v, proceeding with typical restore process.", sourceCluster.Name)
+		}
+	}
+
 	r.setVolumeSize(ctx, cluster, pvc, instanceSpec.Name)
 
 	// Clear any set limit before applying PVC. This is needed to allow the limit
@@ -659,7 +675,7 @@ func (r *Reconciler) setVolumeSize(ctx context.Context, cluster *v1beta1.Postgre
 			corev1.ResourceStorage: *resource.NewQuantity(volumeLimitFromSpec.Value(), resource.BinarySI),
 		}
 		// Otherwise, if the limit is not set or the feature gate is not enabled, do not autogrow.
-	} else if !volumeLimitFromSpec.IsZero() && util.DefaultMutableFeatureGate.Enabled(util.AutoGrowVolumes) {
+	} else if !volumeLimitFromSpec.IsZero() && feature.Enabled(ctx, feature.AutoGrowVolumes) {
 		for i := range cluster.Status.InstanceSets {
 			if instanceSpecName == cluster.Status.InstanceSets[i].Name {
 				for _, dpv := range cluster.Status.InstanceSets[i].DesiredPGDataVolume {
@@ -713,7 +729,7 @@ func (r *Reconciler) reconcileTablespaceVolumes(
 	clusterVolumes []corev1.PersistentVolumeClaim,
 ) (tablespaceVolumes []*corev1.PersistentVolumeClaim, err error) {
 
-	if !util.DefaultMutableFeatureGate.Enabled(util.TablespaceVolumes) {
+	if !feature.Enabled(ctx, feature.TablespaceVolumes) {
 		return
 	}
 

@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package v1beta1
 
@@ -33,8 +22,8 @@ type PostgresClusterSpec struct {
 	DataSource *DataSource `json:"dataSource,omitempty"`
 
 	// PostgreSQL backup configuration
-	// +kubebuilder:validation:Required
-	Backups Backups `json:"backups"`
+	// +optional
+	Backups Backups `json:"backups,omitempty"`
 
 	// The secret containing the Certificates and Keys to encrypt PostgreSQL
 	// traffic will need to contain the server TLS certificate, TLS key and the
@@ -122,8 +111,8 @@ type PostgresClusterSpec struct {
 
 	// The major version of PostgreSQL installed in the PostgreSQL image
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Minimum=10
-	// +kubebuilder:validation:Maximum=16
+	// +kubebuilder:validation:Minimum=11
+	// +kubebuilder:validation:Maximum=17
 	// +operator-sdk:csv:customresourcedefinitions:type=spec,order=1
 	PostgresVersion int `json:"postgresVersion"`
 
@@ -166,7 +155,17 @@ type PostgresClusterSpec struct {
 	// A list of group IDs applied to the process of a container. These can be
 	// useful when accessing shared file systems with constrained permissions.
 	// More info: https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#security-context
-	// +optional
+	// ---
+	// +kubebuilder:validation:Optional
+	//
+	// Containers should not run with a root GID.
+	// - https://kubernetes.io/docs/concepts/security/pod-security-standards/
+	// +kubebuilder:validation:items:Minimum=1
+	//
+	// Supplementary GIDs must fit within int32.
+	// - https://releases.k8s.io/v1.18.0/pkg/apis/core/validation/validation.go#L3659-L3663
+	// - https://releases.k8s.io/v1.22.0/pkg/apis/core/validation/validation.go#L3923-L3927
+	// +kubebuilder:validation:items:Maximum=2147483647
 	SupplementalGroups []int64 `json:"supplementalGroups,omitempty"`
 
 	// Users to create inside PostgreSQL and the databases they should access.
@@ -322,8 +321,12 @@ func (s *PostgresClusterSpec) Default() {
 type Backups struct {
 
 	// pgBackRest archive configuration
-	// +kubebuilder:validation:Required
+	// +optional
 	PGBackRest PGBackRestArchive `json:"pgbackrest"`
+
+	// VolumeSnapshot configuration
+	// +optional
+	Snapshots *VolumeSnapshots `json:"snapshots,omitempty"`
 }
 
 // PostgresClusterStatus defines the observed state of PostgresCluster
@@ -447,7 +450,20 @@ type PostgresInstanceSetSpec struct {
 
 	// Defines a PersistentVolumeClaim for PostgreSQL data.
 	// More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes
+	// ---
 	// +kubebuilder:validation:Required
+	//
+	// NOTE(validation): Every PVC must have at least one accessMode. NOTE(KEP-4153)
+	// TODO(k8s-1.28): fieldPath=`.accessModes`,reason="FieldValueRequired"
+	// - https://releases.k8s.io/v1.25.0/pkg/apis/core/validation/validation.go#L2098-L2100
+	// - https://releases.k8s.io/v1.31.0/pkg/apis/core/validation/validation.go#L2292-L2294
+	// +kubebuilder:validation:XValidation:rule=`has(self.accessModes) && size(self.accessModes) > 0`,message=`missing accessModes`
+	//
+	// NOTE(validation): Every PVC must have a positive storage request. NOTE(KEP-4153)
+	// TODO(k8s-1.28): fieldPath=`.resources.requests.storage`,reason="FieldValueRequired"
+	// - https://releases.k8s.io/v1.25.0/pkg/apis/core/validation/validation.go#L2126-L2133
+	// - https://releases.k8s.io/v1.31.0/pkg/apis/core/validation/validation.go#L2318-L2325
+	// +kubebuilder:validation:XValidation:rule=`has(self.resources) && has(self.resources.requests) && has(self.resources.requests.storage)`,message=`missing storage request`
 	DataVolumeClaimSpec corev1.PersistentVolumeClaimSpec `json:"dataVolumeClaimSpec"`
 
 	// Priority class name for the PostgreSQL pod. Changing this value causes
@@ -488,7 +504,20 @@ type PostgresInstanceSetSpec struct {
 
 	// Defines a separate PersistentVolumeClaim for PostgreSQL's write-ahead log.
 	// More info: https://www.postgresql.org/docs/current/wal.html
-	// +optional
+	// ---
+	// +kubebuilder:validation:Optional
+	//
+	// NOTE(validation): Every PVC must have at least one accessMode. NOTE(KEP-4153)
+	// TODO(k8s-1.28): fieldPath=`.accessModes`,reason="FieldValueRequired"
+	// - https://releases.k8s.io/v1.25.0/pkg/apis/core/validation/validation.go#L2098-L2100
+	// - https://releases.k8s.io/v1.31.0/pkg/apis/core/validation/validation.go#L2292-L2294
+	// +kubebuilder:validation:XValidation:rule=`has(self.accessModes) && size(self.accessModes) > 0`,message=`missing accessModes`
+	//
+	// NOTE(validation): Every PVC must have a positive storage request. NOTE(KEP-4153)
+	// TODO(k8s-1.28): fieldPath=`.resources.requests.storage`,reason="FieldValueRequired"
+	// - https://releases.k8s.io/v1.25.0/pkg/apis/core/validation/validation.go#L2126-L2133
+	// - https://releases.k8s.io/v1.31.0/pkg/apis/core/validation/validation.go#L2318-L2325
+	// +kubebuilder:validation:XValidation:rule=`has(self.resources) && has(self.resources.requests) && has(self.resources.requests.storage)`,message=`missing storage request`
 	WALVolumeClaimSpec *corev1.PersistentVolumeClaimSpec `json:"walVolumeClaimSpec,omitempty"`
 
 	// The list of tablespaces volumes to mount for this postgrescluster
@@ -517,7 +546,20 @@ type TablespaceVolume struct {
 
 	// Defines a PersistentVolumeClaim for a tablespace.
 	// More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes
+	// ---
 	// +kubebuilder:validation:Required
+	//
+	// NOTE(validation): Every PVC must have at least one accessMode. NOTE(KEP-4153)
+	// TODO(k8s-1.28): fieldPath=`.accessModes`,reason="FieldValueRequired"
+	// - https://releases.k8s.io/v1.25.0/pkg/apis/core/validation/validation.go#L2098-L2100
+	// - https://releases.k8s.io/v1.31.0/pkg/apis/core/validation/validation.go#L2292-L2294
+	// +kubebuilder:validation:XValidation:rule=`has(self.accessModes) && size(self.accessModes) > 0`,message=`missing accessModes`
+	//
+	// NOTE(validation): Every PVC must have a positive storage request. NOTE(KEP-4153)
+	// TODO(k8s-1.28): fieldPath=`.resources.requests.storage`,reason="FieldValueRequired"
+	// - https://releases.k8s.io/v1.25.0/pkg/apis/core/validation/validation.go#L2126-L2133
+	// - https://releases.k8s.io/v1.31.0/pkg/apis/core/validation/validation.go#L2318-L2325
+	// +kubebuilder:validation:XValidation:rule=`has(self.resources) && has(self.resources.requests) && has(self.resources.requests.storage)`,message=`missing storage request`
 	DataVolumeClaimSpec corev1.PersistentVolumeClaimSpec `json:"dataVolumeClaimSpec"`
 }
 
@@ -695,4 +737,12 @@ func NewPostgresCluster() *PostgresCluster {
 	cluster := &PostgresCluster{}
 	cluster.SetGroupVersionKind(GroupVersion.WithKind("PostgresCluster"))
 	return cluster
+}
+
+// VolumeSnapshots defines the configuration for VolumeSnapshots
+type VolumeSnapshots struct {
+	// Name of the VolumeSnapshotClass that should be used by VolumeSnapshots
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	VolumeSnapshotClassName string `json:"volumeSnapshotClassName"`
 }

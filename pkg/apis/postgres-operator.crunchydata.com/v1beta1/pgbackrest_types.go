@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package v1beta1
 
@@ -60,15 +49,15 @@ type PGBackRestJobStatus struct {
 type PGBackRestScheduledBackupStatus struct {
 
 	// The name of the associated pgBackRest scheduled backup CronJob
-	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Optional
 	CronJobName string `json:"cronJobName,omitempty"`
 
 	// The name of the associated pgBackRest repository
-	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Optional
 	RepoName string `json:"repo,omitempty"`
 
 	// The pgBackRest backup type for this Job
-	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Optional
 	Type string `json:"type,omitempty"`
 
 	// Represents the time the manual backup Job was acknowledged by the Job controller.
@@ -353,7 +342,20 @@ type RepoHostStatus struct {
 type RepoPVC struct {
 
 	// Defines a PersistentVolumeClaim spec used to create and/or bind a volume
+	// ---
 	// +kubebuilder:validation:Required
+	//
+	// NOTE(validation): Every PVC must have at least one accessMode. NOTE(KEP-4153)
+	// TODO(k8s-1.28): fieldPath=`.accessModes`,reason="FieldValueRequired"
+	// - https://releases.k8s.io/v1.25.0/pkg/apis/core/validation/validation.go#L2098-L2100
+	// - https://releases.k8s.io/v1.31.0/pkg/apis/core/validation/validation.go#L2292-L2294
+	// +kubebuilder:validation:XValidation:rule=`has(self.accessModes) && size(self.accessModes) > 0`,message=`missing accessModes`
+	//
+	// NOTE(validation): Every PVC must have a positive storage request. NOTE(KEP-4153)
+	// TODO(k8s-1.28): fieldPath=`.resources.requests.storage`,reason="FieldValueRequired"
+	// - https://releases.k8s.io/v1.25.0/pkg/apis/core/validation/validation.go#L2126-L2133
+	// - https://releases.k8s.io/v1.31.0/pkg/apis/core/validation/validation.go#L2318-L2325
+	// +kubebuilder:validation:XValidation:rule=`has(self.resources) && has(self.resources.requests) && has(self.resources.requests.storage)`,message=`missing storage request`
 	VolumeClaimSpec corev1.PersistentVolumeClaimSpec `json:"volumeClaimSpec"`
 }
 

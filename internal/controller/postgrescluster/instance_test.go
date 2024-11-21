@@ -1,17 +1,6 @@
-/*
- Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
- Licensed under the Apache License, Version 2.0 (the "License");
- you may not use this file except in compliance with the License.
- You may obtain a copy of the License at
-
- http://www.apache.org/licenses/LICENSE-2.0
-
- Unless required by applicable law or agreed to in writing, software
- distributed under the License is distributed on an "AS IS" BASIS,
- WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- See the License for the specific language governing permissions and
- limitations under the License.
-*/
+// Copyright 2021 - 2024 Crunchy Data Solutions, Inc.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 package postgrescluster
 
@@ -52,7 +41,6 @@ import (
 	"github.com/crunchydata/postgres-operator/internal/testing/cmp"
 	"github.com/crunchydata/postgres-operator/internal/testing/events"
 	"github.com/crunchydata/postgres-operator/internal/testing/require"
-	"github.com/crunchydata/postgres-operator/internal/util"
 	"github.com/crunchydata/postgres-operator/pkg/apis/postgres-operator.crunchydata.com/v1beta1"
 )
 
@@ -536,8 +524,9 @@ func TestWritablePod(t *testing.T) {
 }
 
 func TestAddPGBackRestToInstancePodSpec(t *testing.T) {
-	assert.NilError(t, util.AddAndSetFeatureGates(string(util.TablespaceVolumes+"=false")))
+	t.Parallel()
 
+	ctx := context.Background()
 	cluster := v1beta1.PostgresCluster{}
 	cluster.Name = "hippo"
 	cluster.Default()
@@ -562,14 +551,14 @@ func TestAddPGBackRestToInstancePodSpec(t *testing.T) {
 		cluster.Spec.Backups.PGBackRest.Repos = nil
 
 		out := pod.DeepCopy()
-		addPGBackRestToInstancePodSpec(cluster, &certificates, out)
+		addPGBackRestToInstancePodSpec(ctx, cluster, &certificates, out)
 
 		// Only Containers and Volumes fields have changed.
 		assert.DeepEqual(t, pod, *out, cmpopts.IgnoreFields(pod, "Containers", "Volumes"))
 
 		// Only database container has mounts.
 		// Other containers are ignored.
-		assert.Assert(t, marshalMatches(out.Containers, `
+		assert.Assert(t, cmp.MarshalMatches(out.Containers, `
 - name: database
   resources: {}
   volumeMounts:
@@ -578,36 +567,90 @@ func TestAddPGBackRestToInstancePodSpec(t *testing.T) {
     readOnly: true
 - name: other
   resources: {}
+- command:
+  - pgbackrest
+  - server
+  livenessProbe:
+    exec:
+      command:
+      - pgbackrest
+      - server-ping
+  name: pgbackrest
+  resources: {}
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+      - ALL
+    privileged: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  volumeMounts:
+  - mountPath: /etc/pgbackrest/server
+    name: pgbackrest-server
+    readOnly: true
+  - mountPath: /pgdata
+    name: postgres-data
+  - mountPath: /pgwal
+    name: postgres-wal
+  - mountPath: /etc/pgbackrest/conf.d
+    name: pgbackrest-config
+    readOnly: true
+- command:
+  - bash
+  - -ceu
+  - --
+  - |-
+    monitor() {
+    exec {fd}<> <(:||:)
+    until read -r -t 5 -u "${fd}"; do
+      if
+        [[ "${filename}" -nt "/proc/self/fd/${fd}" ]] &&
+        pkill -HUP --exact --parent=0 pgbackrest
+      then
+        exec {fd}>&- && exec {fd}<> <(:||:)
+        stat --dereference --format='Loaded configuration dated %y' "${filename}"
+      elif
+        { [[ "${directory}" -nt "/proc/self/fd/${fd}" ]] ||
+          [[ "${authority}" -nt "/proc/self/fd/${fd}" ]]
+        } &&
+        pkill -HUP --exact --parent=0 pgbackrest
+      then
+        exec {fd}>&- && exec {fd}<> <(:||:)
+        stat --format='Loaded certificates dated %y' "${directory}"
+      fi
+    done
+    }; export directory="$1" authority="$2" filename="$3"; export -f monitor; exec -a "$0" bash -ceu monitor
+  - pgbackrest-config
+  - /etc/pgbackrest/server
+  - /etc/pgbackrest/conf.d/~postgres-operator/tls-ca.crt
+  - /etc/pgbackrest/conf.d/~postgres-operator_server.conf
+  name: pgbackrest-config
+  resources: {}
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+      - ALL
+    privileged: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  volumeMounts:
+  - mountPath: /etc/pgbackrest/server
+    name: pgbackrest-server
+    readOnly: true
+  - mountPath: /etc/pgbackrest/conf.d
+    name: pgbackrest-config
+    readOnly: true
 		`))
 
-		// Instance configuration files but no certificates.
+		// Instance configuration files with certificates.
 		// Other volumes are ignored.
-		assert.Assert(t, marshalMatches(out.Volumes, `
-- name: other
-- name: postgres-data
-- name: postgres-wal
-- name: pgbackrest-config
-  projected:
-    sources:
-    - configMap:
-        items:
-        - key: pgbackrest_instance.conf
-          path: pgbackrest_instance.conf
-        - key: config-hash
-          path: config-hash
-        name: hippo-pgbackrest-config
-		`))
-	})
-
-	t.Run("OneVolumeRepo", func(t *testing.T) {
-		alwaysExpect := func(t testing.TB, result *corev1.PodSpec) {
-			// Only Containers and Volumes fields have changed.
-			assert.DeepEqual(t, pod, *result, cmpopts.IgnoreFields(pod, "Containers", "Volumes"))
-
-			// Instance configuration files plus client and server certificates.
-			// The server certificate comes from the instance Secret.
-			// Other volumes are untouched.
-			assert.Assert(t, marshalMatches(result.Volumes, `
+		assert.Assert(t, cmp.MarshalMatches(out.Volumes, `
 - name: other
 - name: postgres-data
 - name: postgres-wal
@@ -644,7 +687,54 @@ func TestAddPGBackRestToInstancePodSpec(t *testing.T) {
           mode: 384
           path: ~postgres-operator/client-tls.key
         name: hippo-pgbackrest
-        optional: true
+		`))
+	})
+
+	t.Run("OneVolumeRepo", func(t *testing.T) {
+		alwaysExpect := func(t testing.TB, result *corev1.PodSpec) {
+			// Only Containers and Volumes fields have changed.
+			assert.DeepEqual(t, pod, *result, cmpopts.IgnoreFields(pod, "Containers", "Volumes"))
+
+			// Instance configuration files plus client and server certificates.
+			// The server certificate comes from the instance Secret.
+			// Other volumes are untouched.
+			assert.Assert(t, cmp.MarshalMatches(result.Volumes, `
+- name: other
+- name: postgres-data
+- name: postgres-wal
+- name: pgbackrest-server
+  projected:
+    sources:
+    - secret:
+        items:
+        - key: pgbackrest-server.crt
+          path: server-tls.crt
+        - key: pgbackrest-server.key
+          mode: 384
+          path: server-tls.key
+        name: some-secret
+- name: pgbackrest-config
+  projected:
+    sources:
+    - configMap:
+        items:
+        - key: pgbackrest_instance.conf
+          path: pgbackrest_instance.conf
+        - key: config-hash
+          path: config-hash
+        - key: pgbackrest-server.conf
+          path: ~postgres-operator_server.conf
+        name: hippo-pgbackrest-config
+    - secret:
+        items:
+        - key: pgbackrest.ca-roots
+          path: ~postgres-operator/tls-ca.crt
+        - key: pgbackrest-client.crt
+          path: ~postgres-operator/client-tls.crt
+        - key: pgbackrest-client.key
+          mode: 384
+          path: ~postgres-operator/client-tls.key
+        name: hippo-pgbackrest
 			`))
 		}
 
@@ -657,12 +747,12 @@ func TestAddPGBackRestToInstancePodSpec(t *testing.T) {
 		}
 
 		out := pod.DeepCopy()
-		addPGBackRestToInstancePodSpec(cluster, &certificates, out)
+		addPGBackRestToInstancePodSpec(ctx, cluster, &certificates, out)
 		alwaysExpect(t, out)
 
 		// The TLS server is added and configuration mounted.
 		// It has PostgreSQL volumes mounted while other volumes are ignored.
-		assert.Assert(t, marshalMatches(out.Containers, `
+		assert.Assert(t, cmp.MarshalMatches(out.Containers, `
 - name: database
   resources: {}
   volumeMounts:
@@ -769,7 +859,7 @@ func TestAddPGBackRestToInstancePodSpec(t *testing.T) {
 
 			before := out.DeepCopy()
 			out := pod.DeepCopy()
-			addPGBackRestToInstancePodSpec(cluster, &certificates, out)
+			addPGBackRestToInstancePodSpec(ctx, cluster, &certificates, out)
 			alwaysExpect(t, out)
 
 			// Only the TLS server container changed.
@@ -778,7 +868,7 @@ func TestAddPGBackRestToInstancePodSpec(t *testing.T) {
 			assert.DeepEqual(t, before.Containers[:2], out.Containers[:2])
 
 			// It has the custom resources.
-			assert.Assert(t, marshalMatches(out.Containers[2:], `
+			assert.Assert(t, cmp.MarshalMatches(out.Containers[2:], `
 - command:
   - pgbackrest
   - server
@@ -1253,9 +1343,6 @@ func TestDeleteInstance(t *testing.T) {
 		Tracer:   otel.Tracer(t.Name()),
 	}
 
-	// Initialize the feature gate
-	assert.NilError(t, util.AddAndSetFeatureGates(""))
-
 	// Define, Create, and Reconcile a cluster to get an instance running in kube
 	cluster := testCluster()
 	cluster.Namespace = setupNamespace(t, cc).Name
@@ -1478,7 +1565,7 @@ func TestGenerateInstanceStatefulSetIntent(t *testing.T) {
 		name: "check default scheduling constraints are added",
 		run: func(t *testing.T, ss *appsv1.StatefulSet) {
 			assert.Equal(t, len(ss.Spec.Template.Spec.TopologySpreadConstraints), 2)
-			assert.Assert(t, marshalMatches(ss.Spec.Template.Spec.TopologySpreadConstraints, `
+			assert.Assert(t, cmp.MarshalMatches(ss.Spec.Template.Spec.TopologySpreadConstraints, `
 - labelSelector:
     matchExpressions:
     - key: postgres-operator.crunchydata.com/data
@@ -1525,7 +1612,7 @@ func TestGenerateInstanceStatefulSetIntent(t *testing.T) {
 		},
 		run: func(t *testing.T, ss *appsv1.StatefulSet) {
 			assert.Equal(t, len(ss.Spec.Template.Spec.TopologySpreadConstraints), 3)
-			assert.Assert(t, marshalMatches(ss.Spec.Template.Spec.TopologySpreadConstraints, `
+			assert.Assert(t, cmp.MarshalMatches(ss.Spec.Template.Spec.TopologySpreadConstraints, `
 - labelSelector:
     matchExpressions:
     - key: postgres-operator.crunchydata.com/cluster
@@ -1608,7 +1695,7 @@ func TestGenerateInstanceStatefulSetIntent(t *testing.T) {
 		},
 		run: func(t *testing.T, ss *appsv1.StatefulSet) {
 			assert.Equal(t, len(ss.Spec.Template.Spec.TopologySpreadConstraints), 1)
-			assert.Assert(t, marshalMatches(ss.Spec.Template.Spec.TopologySpreadConstraints,
+			assert.Assert(t, cmp.MarshalMatches(ss.Spec.Template.Spec.TopologySpreadConstraints,
 				`- labelSelector:
     matchExpressions:
     - key: postgres-operator.crunchydata.com/cluster
@@ -1885,7 +1972,7 @@ func TestReconcileInstanceSetPodDisruptionBudget(t *testing.T) {
 		cluster := testCluster()
 		cluster.Namespace = ns.Name
 		spec := &cluster.Spec.InstanceSets[0]
-		spec.MinAvailable = initialize.IntOrStringInt32(0)
+		spec.MinAvailable = initialize.Pointer(intstr.FromInt32(0))
 		assert.NilError(t, r.reconcileInstanceSetPodDisruptionBudget(ctx, cluster, spec))
 		assert.Assert(t, !foundPDB(cluster, spec))
 	})
@@ -1894,7 +1981,7 @@ func TestReconcileInstanceSetPodDisruptionBudget(t *testing.T) {
 		cluster := testCluster()
 		cluster.Namespace = ns.Name
 		spec := &cluster.Spec.InstanceSets[0]
-		spec.MinAvailable = initialize.IntOrStringInt32(1)
+		spec.MinAvailable = initialize.Pointer(intstr.FromInt32(1))
 
 		assert.NilError(t, r.Client.Create(ctx, cluster))
 		t.Cleanup(func() { assert.Check(t, r.Client.Delete(ctx, cluster)) })
@@ -1903,7 +1990,7 @@ func TestReconcileInstanceSetPodDisruptionBudget(t *testing.T) {
 		assert.Assert(t, foundPDB(cluster, spec))
 
 		t.Run("deleted", func(t *testing.T) {
-			spec.MinAvailable = initialize.IntOrStringInt32(0)
+			spec.MinAvailable = initialize.Pointer(intstr.FromInt32(0))
 			err := r.reconcileInstanceSetPodDisruptionBudget(ctx, cluster, spec)
 			if apierrors.IsConflict(err) {
 				// When running in an existing environment another controller will sometimes update
@@ -1921,7 +2008,7 @@ func TestReconcileInstanceSetPodDisruptionBudget(t *testing.T) {
 		cluster := testCluster()
 		cluster.Namespace = ns.Name
 		spec := &cluster.Spec.InstanceSets[0]
-		spec.MinAvailable = initialize.IntOrStringString("50%")
+		spec.MinAvailable = initialize.Pointer(intstr.FromString("50%"))
 
 		assert.NilError(t, r.Client.Create(ctx, cluster))
 		t.Cleanup(func() { assert.Check(t, r.Client.Delete(ctx, cluster)) })
@@ -1930,7 +2017,7 @@ func TestReconcileInstanceSetPodDisruptionBudget(t *testing.T) {
 		assert.Assert(t, foundPDB(cluster, spec))
 
 		t.Run("deleted", func(t *testing.T) {
-			spec.MinAvailable = initialize.IntOrStringString("0%")
+			spec.MinAvailable = initialize.Pointer(intstr.FromString("0%"))
 			err := r.reconcileInstanceSetPodDisruptionBudget(ctx, cluster, spec)
 			if apierrors.IsConflict(err) {
 				// When running in an existing environment another controller will sometimes update
@@ -1944,13 +2031,13 @@ func TestReconcileInstanceSetPodDisruptionBudget(t *testing.T) {
 		})
 
 		t.Run("delete with 00%", func(t *testing.T) {
-			spec.MinAvailable = initialize.IntOrStringString("50%")
+			spec.MinAvailable = initialize.Pointer(intstr.FromString("50%"))
 
 			assert.NilError(t, r.reconcileInstanceSetPodDisruptionBudget(ctx, cluster, spec))
 			assert.Assert(t, foundPDB(cluster, spec))
 
 			t.Run("deleted", func(t *testing.T) {
-				spec.MinAvailable = initialize.IntOrStringString("00%")
+				spec.MinAvailable = initialize.Pointer(intstr.FromString("00%"))
 				err := r.reconcileInstanceSetPodDisruptionBudget(ctx, cluster, spec)
 				if apierrors.IsConflict(err) {
 					// When running in an existing environment another controller will sometimes update
@@ -2023,13 +2110,13 @@ func TestCleanupDisruptionBudgets(t *testing.T) {
 		cluster := testCluster()
 		cluster.Namespace = ns.Name
 		spec := &cluster.Spec.InstanceSets[0]
-		spec.MinAvailable = initialize.IntOrStringInt32(1)
+		spec.MinAvailable = initialize.Pointer(intstr.FromInt32(1))
 
 		assert.NilError(t, r.Client.Create(ctx, cluster))
 		t.Cleanup(func() { assert.Check(t, r.Client.Delete(ctx, cluster)) })
 
 		expectedPDB := generatePDB(t, cluster, spec,
-			initialize.IntOrStringInt32(1))
+			initialize.Pointer(intstr.FromInt32(1)))
 		assert.NilError(t, createPDB(expectedPDB))
 
 		t.Run("no instances were removed", func(t *testing.T) {
@@ -2042,7 +2129,7 @@ func TestCleanupDisruptionBudgets(t *testing.T) {
 			leftoverPDB := generatePDB(t, cluster, &v1beta1.PostgresInstanceSetSpec{
 				Name:     "old-instance",
 				Replicas: initialize.Int32(1),
-			}, initialize.IntOrStringInt32(1))
+			}, initialize.Pointer(intstr.FromInt32(1)))
 			assert.NilError(t, createPDB(leftoverPDB))
 
 			assert.Assert(t, foundPDB(expectedPDB))

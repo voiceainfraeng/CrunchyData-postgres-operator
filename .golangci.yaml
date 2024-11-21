@@ -8,6 +8,7 @@ linters:
     - gofumpt
   enable:
     - depguard
+    - goheader
     - gomodguard
     - gosimple
     - importas
@@ -43,6 +44,15 @@ linters-settings:
   exhaustive:
     default-signifies-exhaustive: true
 
+  goheader:
+    template: |-
+      Copyright {{ DATES }} Crunchy Data Solutions, Inc.
+
+      SPDX-License-Identifier: Apache-2.0
+    values:
+      regexp:
+        DATES: '((201[7-9]|202[0-3]) - 2024|2024)'
+
   goimports:
     local-prefixes: github.com/crunchydata/postgres-operator
 
@@ -56,6 +66,11 @@ linters-settings:
             reason: >
               k8s.io/kubernetes is for managing dependencies of the Kubernetes
               project, i.e. building kubelet and kubeadm.
+
+  gosec:
+    excludes:
+      # Flags for potentially-unsafe casting of ints, similar problem to globally-disabled G103
+      - G115
 
   importas:
     alias:

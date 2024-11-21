@@ -6,8 +6,11 @@ PGO_IMAGE_URL ?= https://www.crunchydata.com/products/crunchy-postgresql-for-kub
 PGO_IMAGE_PREFIX ?= localhost
 
 PGMONITOR_DIR ?= hack/tools/pgmonitor
-PGMONITOR_VERSION ?= v4.11.0
+PGMONITOR_VERSION ?= v5.1.1
 QUERIES_CONFIG_DIR ?= hack/tools/queries
+
+EXTERNAL_SNAPSHOTTER_DIR ?= hack/tools/external-snapshotter
+EXTERNAL_SNAPSHOTTER_VERSION ?= v8.0.1
 
 # Buildah's "build" used to be "bud". Use the alias to be compatible for a while.
 BUILDAH_BUILD ?= buildah bud
@@ -52,18 +55,23 @@ get-pgmonitor:
 	cp -r '$(PGMONITOR_DIR)/postgres_exporter/common/.' '${QUERIES_CONFIG_DIR}'
 	cp '$(PGMONITOR_DIR)/postgres_exporter/linux/queries_backrest.yml' '${QUERIES_CONFIG_DIR}'
 
+.PHONY: get-external-snapshotter
+get-external-snapshotter:
+	git -C '$(dir $(EXTERNAL_SNAPSHOTTER_DIR))' clone https://github.com/kubernetes-csi/external-snapshotter.git || git -C '$(EXTERNAL_SNAPSHOTTER_DIR)' fetch origin
+	@git -C '$(EXTERNAL_SNAPSHOTTER_DIR)' checkout '$(EXTERNAL_SNAPSHOTTER_VERSION)'
+	@git -C '$(EXTERNAL_SNAPSHOTTER_DIR)' config pull.ff only
+
 .PHONY: clean
 clean: ## Clean resources
 clean: clean-deprecated
 	rm -f bin/postgres-operator
-	rm -f config/rbac/role.yaml
 	rm -rf licenses/*/
 	[ ! -d testing/kuttl/e2e-generated ] || rm -r testing/kuttl/e2e-generated
 	[ ! -d testing/kuttl/e2e-generated-other ] || rm -r testing/kuttl/e2e-generated-other
-	rm -rf build/crd/generated build/crd/*/generated
 	[ ! -f hack/tools/setup-envtest ] || rm hack/tools/setup-envtest
 	[ ! -d hack/tools/envtest ] || { chmod -R u+w hack/tools/envtest && rm -r hack/tools/envtest; }
 	[ ! -d hack/tools/pgmonitor ] || rm -rf hack/tools/pgmonitor
+	[ ! -d hack/tools/external-snapshotter ] || rm -rf hack/tools/external-snapshotter
 	[ ! -n "$$(ls hack/tools)" ] || rm -r hack/tools/*
 	[ ! -d hack/.kube ] || rm -r hack/.kube
 
@@ -84,6 +92,8 @@ clean-deprecated: ## Clean deprecated resources
 	@# crunchy-postgres-exporter used to live in this repo
 	[ ! -d bin/crunchy-postgres-exporter ] || rm -r bin/crunchy-postgres-exporter
 	[ ! -d build/crunchy-postgres-exporter ] || rm -r build/crunchy-postgres-exporter
+	@# CRDs used to require patching
+	[ ! -d build/crd ] || rm -r build/crd
 
 
 ##@ Deployment
@@ -113,7 +123,7 @@ undeploy: ## Undeploy the PostgreSQL Operator
 
 .PHONY: deploy-dev
 deploy-dev: ## Deploy the PostgreSQL Operator locally
-deploy-dev: PGO_FEATURE_GATES ?= "TablespaceVolumes=true"
+deploy-dev: PGO_FEATURE_GATES ?= "TablespaceVolumes=true,VolumeSnapshots=true"
 deploy-dev: get-pgmonitor
 deploy-dev: build-postgres-operator
 deploy-dev: createnamespaces
@@ -126,6 +136,9 @@ deploy-dev: createnamespaces
 		CHECK_FOR_UPGRADES='$(if $(CHECK_FOR_UPGRADES),$(CHECK_FOR_UPGRADES),false)' \
 		KUBECONFIG=hack/.kube/postgres-operator/pgo \
 		PGO_NAMESPACE='postgres-operator' \
+		PGO_INSTALLER='deploy-dev' \
+		PGO_INSTALLER_ORIGIN='postgres-operator-repo' \
+		BUILD_SOURCE='build-postgres-operator' \
 		$(shell kubectl kustomize ./config/dev | \
 			sed -ne '/^kind: Deployment/,/^---/ { \
 				/RELATED_IMAGE_/ { N; s,.*\(RELATED_[^[:space:]]*\).*value:[[:space:]]*\([^[:space:]]*\),\1="\2",; p; }; \
@@ -190,7 +203,7 @@ check: get-pgmonitor
 check-envtest: ## Run check using envtest and a mock kube api
 check-envtest: ENVTEST_USE = $(ENVTEST) --bin-dir=$(CURDIR)/hack/tools/envtest use $(ENVTEST_K8S_VERSION)
 check-envtest: SHELL = bash
-check-envtest: get-pgmonitor tools/setup-envtest
+check-envtest: get-pgmonitor tools/setup-envtest get-external-snapshotter
 	@$(ENVTEST_USE) --print=overview && echo
 	source <($(ENVTEST_USE) --print=env) && PGO_NAMESPACE="postgres-operator" QUERIES_CONFIG_DIR="$(CURDIR)/${QUERIES_CONFIG_DIR}" \
 		$(GO_TEST) -count=1 -cover ./...
@@ -201,7 +214,7 @@ check-envtest: get-pgmonitor tools/setup-envtest
 # make check-envtest-existing PGO_TEST_TIMEOUT_SCALE=1.2
 .PHONY: check-envtest-existing
 check-envtest-existing: ## Run check using envtest and an existing kube api
-check-envtest-existing: get-pgmonitor
+check-envtest-existing: get-pgmonitor get-external-snapshotter
 check-envtest-existing: createnamespaces
 	kubectl apply --server-side -k ./config/dev
 	USE_EXISTING_CLUSTER=true PGO_NAMESPACE="postgres-operator" QUERIES_CONFIG_DIR="$(CURDIR)/${QUERIES_CONFIG_DIR}" \
@@ -266,27 +279,7 @@ generate-crd: tools/controller-gen
 	$(CONTROLLER) \
 		crd:crdVersions='v1' \
 		paths='./pkg/apis/...' \
-		output:dir='build/crd/postgresclusters/generated' # build/crd/{plural}/generated/{group}_{plural}.yaml
-	@
-	$(CONTROLLER) \
-		crd:crdVersions='v1' \
-		paths='./pkg/apis/...' \
-		output:dir='build/crd/pgupgrades/generated' # build/crd/{plural}/generated/{group}_{plural}.yaml
-	@
-	$(CONTROLLER) \
-		crd:crdVersions='v1' \
-		paths='./pkg/apis/...' \
-		output:dir='build/crd/pgadmins/generated' # build/crd/{plural}/generated/{group}_{plural}.yaml
-	@
-	$(CONTROLLER) \
-		crd:crdVersions='v1' \
-		paths='./pkg/apis/...' \
-		output:dir='build/crd/crunchybridgeclusters/generated' # build/crd/{plural}/generated/{group}_{plural}.yaml
-	@
-	kubectl kustomize ./build/crd/postgresclusters > ./config/crd/bases/postgres-operator.crunchydata.com_postgresclusters.yaml
-	kubectl kustomize ./build/crd/pgupgrades > ./config/crd/bases/postgres-operator.crunchydata.com_pgupgrades.yaml
-	kubectl kustomize ./build/crd/pgadmins > ./config/crd/bases/postgres-operator.crunchydata.com_pgadmins.yaml
-	kubectl kustomize ./build/crd/crunchybridgeclusters > ./config/crd/bases/postgres-operator.crunchydata.com_crunchybridgeclusters.yaml
+		output:dir='config/crd/bases' # {directory}/{group}_{plural}.yaml
 
 .PHONY: generate-deepcopy
 generate-deepcopy: ## Generate DeepCopy functions
@@ -299,10 +292,9 @@ generate-deepcopy: tools/controller-gen
 generate-rbac: ## Generate RBAC
 generate-rbac: tools/controller-gen
 	$(CONTROLLER) \
-		rbac:roleName='generated' \
+		rbac:roleName='postgres-operator' \
 		paths='./cmd/...' paths='./internal/...' \
-		output:dir='config/rbac' # ${directory}/role.yaml
-	./hack/generate-rbac.sh 'config/rbac'
+		output:dir='config/rbac' # {directory}/role.yaml
 
 ##@ Tools
 
@@ -317,7 +309,7 @@ endef
 CONTROLLER ?= hack/tools/controller-gen
 tools: tools/controller-gen
 tools/controller-gen:
-	$(call go-get-tool,$(CONTROLLER),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.9.0)
+	$(call go-get-tool,$(CONTROLLER),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.4)
 
 ENVTEST ?= hack/tools/setup-envtest
 tools: tools/setup-envtest
