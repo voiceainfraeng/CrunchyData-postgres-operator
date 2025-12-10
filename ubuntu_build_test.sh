@@ -1,6 +1,6 @@
 #!/bin/bash
 
-GOLANG_URL="https://go.dev/dl/go1.24.2.linux-amd64.tar.gz"
+GOLANG_URL="https://go.dev/dl/go1.25.5.linux-amd64.tar.gz"
 CONTAINER_ID=$(docker run -it -d \
     -u 0:0 \
     -e GOROOT=/usr/local/go \
